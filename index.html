@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Matrix ASCII Generator v1.0</title>
+    <title>Matrix ASCII Generator v1.2</title>
     <style>
         /* НОВАЯ ЦВЕТОВАЯ ПАЛИТРА (Фиолетово-синий неон) */
         :root {
@@ -207,7 +207,7 @@
 </head>
 <body>
 
-    <h1>[ MATRIX ASCII v1.0 ]</h1>
+    <h1>[ MATRIX ASCII v1.2 ]</h1>
 
     <div class="tabs">
         <button class="tab-btn active" onclick="openTab('tab-img')">1. Картинка</button>
@@ -219,10 +219,15 @@
         <!-- ВКЛАДКА 1: КАРТИНКА И ЗУМ -->
         <div class="tab-content active" id="tab-img">
             <label>Загрузить картинку <input type="file" id="imageLoader" accept="image/*"></label>
+            <label class="toggle-label" title="Символы сохраняют цвета соответствующих участков исходного изображения">
+                <input type="checkbox" id="preserveImageColorsCheckbox">
+                Сохранить цвета оригинала
+            </label>
             <label>Режим
                 <select id="modeSelect">
                     <option value="matrix">Matrix (Рандом)</option>
                     <option value="gradient">Градиент</option>
+                    <option value="precisionPlus">Precision Plus</option>
                 </select>
             </label>
             <label>Символы
@@ -234,7 +239,7 @@
                 </select>
             </label>
             <label>Ширина (символов)
-                <input type="range" id="widthSlider" min="40" max="250" value="120">
+                <input type="range" id="widthSlider" min="40" max="450" value="120">
                 <span class="value-display" id="widthValue">120</span>
             </label>
             <label id="thresholdLabel">Плотность
@@ -363,18 +368,22 @@
         const modeSelect = document.getElementById('modeSelect');
         const colorPicker = document.getElementById('colorPicker');
         const bgColorPicker = document.getElementById('bgColorPicker');
+        const preserveImageColorsCheckbox = document.getElementById('preserveImageColorsCheckbox');
         const copyBtn = document.getElementById('copyBtn');
         const downloadBtn = document.getElementById('downloadBtn');
 
         let currentImage = null;
         let currentAsciiStr = "";
+        let currentAsciiColors = [];
+        let precisionRampCache = null;
+        let precisionRampCacheKey = "";
         let currentFontFamily = "'Courier New', Courier, monospace";
         let currentWeight = "400";
         let currentStyle = "normal";
 
         // --- ОБРАБОТЧИКИ ИНТЕРФЕЙСА ---
         modeSelect.addEventListener('change', (e) => {
-            if (e.target.value === 'gradient') {
+            if (e.target.value === 'gradient' || e.target.value === 'precisionPlus') {
                 thresholdSlider.disabled = true;
                 thresholdSlider.style.opacity = '0.3';
                 thresholdLabel.style.opacity = '0.3';
@@ -398,6 +407,7 @@
                 await fontFace.load();
                 document.fonts.add(fontFace);
                 currentFontFamily = `"${fontName}", monospace`;
+                precisionRampCache = null;
                 if (currentImage) updateAll();
             } catch (err) {
                 alert("Не удалось загрузить шрифт.");
@@ -410,6 +420,7 @@
             const [weight, style] = e.target.value.split(' ');
             currentWeight = weight;
             currentStyle = style;
+            precisionRampCache = null;
             if (currentImage) updateAll();
         });
 
@@ -423,6 +434,7 @@
         charSetSelect.addEventListener('change', () => { if (currentImage) updateAll(); });
         colorPicker.addEventListener('input', () => { if (currentImage) updateAll(); });
         bgColorPicker.addEventListener('input', () => { if (currentImage) updateAll(); });
+        preserveImageColorsCheckbox.addEventListener('change', () => { if (currentImage) updateAll(); });
 
         // Логика зума (только для CSS превью, чтобы не перерисовывать холст)
         previewZoomSlider.addEventListener('input', (e) => {
@@ -467,6 +479,59 @@
             reader.readAsDataURL(e.target.files[0]);
         }
 
+        function getPrecisionRamp() {
+            const key = `${currentFontFamily}|${currentWeight}|${currentStyle}`;
+            if (precisionRampCache && precisionRampCacheKey === key) return precisionRampCache;
+
+            const ranges = [
+                [33, 126], [161, 255], [256, 383], [384, 421],
+                [913, 937], [945, 969], [1040, 1103],
+                [8208, 8231], [8240, 8259], [8364, 8364],
+                [8467, 8470], [8704, 8735], [8736, 8759],
+                [8764, 8783], [8800, 8839], [8864, 8895],
+                [8900, 8927], [9472, 9503], [9600, 9631]
+            ];
+            const chars = [];
+            const seen = new Set();
+            for (const [a, b] of ranges) {
+                for (let cp = a; cp <= b; cp++) {
+                    const ch = String.fromCodePoint(cp);
+                    if (/[\s\u0300-\u036f]/u.test(ch) || seen.has(ch)) continue;
+                    seen.add(ch);
+                    chars.push(ch);
+                }
+            }
+
+            const c = document.createElement('canvas');
+            c.width = 32;
+            c.height = 32;
+            const x = c.getContext('2d', { willReadFrequently: true });
+            x.font = `${currentStyle} ${currentWeight} 25px ${currentFontFamily}`;
+            x.textAlign = 'center';
+            x.textBaseline = 'middle';
+
+            const ranked = chars.map(ch => {
+                x.clearRect(0, 0, 32, 32);
+                x.fillStyle = '#fff';
+                x.fillText(ch, 16, 16);
+                const data = x.getImageData(0, 0, 32, 32).data;
+                let ink = 0;
+                for (let k = 3; k < data.length; k += 4) ink += data[k] / 255;
+                return { ch, ink };
+            }).sort((a, b) => a.ink - b.ink);
+
+            // 450 evenly distributed glyphs from the measured Unicode set.
+            const selected = [];
+            const count = Math.min(450, ranked.length);
+            for (let n = 0; n < count; n++) {
+                const idx = Math.round(n * (ranked.length - 1) / Math.max(1, count - 1));
+                selected.push(ranked[idx].ch);
+            }
+            precisionRampCache = selected;
+            precisionRampCacheKey = key;
+            return selected;
+        }
+
         function updateAll() {
             generateAscii();
             renderToCanvas(previewCanvas, pctx, 12, 1); 
@@ -477,46 +542,55 @@
 
             const asciiChars = charSetSelect.value;
             const mode = modeSelect.value;
-            const width = parseInt(widthSlider.value);
+            const width = parseInt(widthSlider.value, 10);
             const threshold = parseFloat(thresholdSlider.value);
             const brightnessMod = parseFloat(brightnessSlider.value);
             const aspect = parseFloat(aspectRatioSlider.value);
-            const height = Math.floor((currentImage.height / currentImage.width) * width * aspect);
+            const height = Math.max(1, Math.floor((currentImage.height / currentImage.width) * width * aspect));
             const emptyChar = invisibleSpaceCheckbox.checked ? "\u2800" : " ";
+            const ramp = mode === "precisionPlus" ? getPrecisionRamp() : null;
 
             hiddenCanvas.width = width;
             hiddenCanvas.height = height;
             hctx.clearRect(0, 0, width, height);
             hctx.drawImage(currentImage, 0, 0, width, height);
 
-            const imageData = hctx.getImageData(0, 0, width, height);
-            const pixels = imageData.data;
-            
+            const pixels = hctx.getImageData(0, 0, width, height).data;
             let asciiStr = "";
+            const asciiColors = [];
 
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
                     const offset = (y * width + x) * 4;
-                    const r = pixels[offset], g = pixels[offset + 1], b = pixels[offset + 2];
-                    
+                    const r = pixels[offset];
+                    const g = pixels[offset + 1];
+                    const b = pixels[offset + 2];
+                    asciiColors.push(`rgb(${r}, ${g}, ${b})`);
+
                     let brightness = (0.299 * r + 0.587 * g + 0.114 * b) * brightnessMod;
-                    if (brightness > 255) brightness = 255; 
-                    let normalized = brightness / 255;
+                    brightness = Math.min(255, brightness);
+                    const normalized = brightness / 255;
 
                     if (normalized < 0.05) {
-                        asciiStr += emptyChar; 
+                        asciiStr += emptyChar;
                         continue;
                     }
 
                     if (mode === "matrix") {
-                        let randVal = pseudoRandom(x, y);
-                        let probability = normalized * threshold; 
+                        const randVal = pseudoRandom(x, y);
+                        const probability = normalized * threshold;
                         if (randVal < probability) {
-                            let charIndex = Math.floor(pseudoRandom(y, x) * asciiChars.length);
+                            const charIndex = Math.floor(pseudoRandom(y, x) * asciiChars.length);
                             asciiStr += asciiChars[charIndex];
                         } else {
-                            asciiStr += emptyChar; 
+                            asciiStr += emptyChar;
                         }
+                    } else if (mode === "precisionPlus") {
+                        const charIndex = Math.min(
+                            ramp.length - 1,
+                            Math.floor(normalized * (ramp.length - 1))
+                        );
+                        asciiStr += ramp[charIndex];
                     } else {
                         const charIndex = Math.floor(normalized * (asciiChars.length - 1));
                         asciiStr += asciiChars[charIndex];
@@ -526,6 +600,7 @@
             }
 
             currentAsciiStr = asciiStr;
+            currentAsciiColors = asciiColors;
         }
 
         // --- УНИВЕРСАЛЬНЫЙ РЕНДЕР ---
@@ -565,6 +640,11 @@
                     
                     if (char === " " || char === "\u2800") continue;
 
+                    const colorIndex = (i * maxChars) + j;
+                    ctx.fillStyle = preserveImageColorsCheckbox.checked
+                        ? (currentAsciiColors[colorIndex] || colorPicker.value)
+                        : colorPicker.value;
+
                     const xPos = padding + (j * cellWidth) + (cellWidth / 2);
                     const yPos = padding + (i * cellHeight) + (cellHeight / 2);
 
@@ -601,7 +681,7 @@
             const dataURL = dlCanvas.toDataURL(mimeType, quality);
 
             const link = document.createElement('a');
-            link.download = `matrix-art-v1.0-${multiplier}x.${format}`;
+            link.download = `matrix-art-v1.2-${multiplier}x.${format}`;
             link.href = dataURL;
             link.click();
         });
